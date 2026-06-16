@@ -1,7 +1,6 @@
 "use client";
 
 import type {
-  AuthorizationCompletedStreamEvent,
   AuthorizationRequiredStreamEvent,
   ClientSession,
   EveAgentStoreSnapshot,
@@ -49,6 +48,11 @@ import { isChatTurnSettledEvent } from "@/lib/chat/events";
 import type { ActiveChat, SetupStatus, Viewer } from "@/lib/chat/types";
 
 type AgentSnapshot = EveAgentStoreSnapshot<EveMessageData>;
+type PersistedClientSession = ClientSession & {
+  readonly state: SessionState;
+  applyLocalEvents: (events: readonly HandleMessageStreamEvent[]) => SessionState;
+  setState: (session: SessionState) => void;
+};
 type StreamSessionOptions = {
   readonly ignoreLeadingWaiting?: boolean;
   readonly signal?: AbortSignal;
@@ -158,7 +162,25 @@ function createPersistedClientSession({
         startIndex,
       });
     },
-  } as unknown as ClientSession;
+    applyLocalEvents(events: readonly HandleMessageStreamEvent[]) {
+      if (!session.sessionId) {
+        throw new Error("Session has no session ID.");
+      }
+
+      session = advanceBrowserSession({
+        baseStreamIndex: session.streamIndex,
+        continuationToken: session.continuationToken,
+        events,
+        session,
+        sessionId: session.sessionId,
+      });
+
+      return session;
+    },
+    setState(nextSession: SessionState) {
+      session = nextSession;
+    },
+  } as unknown as PersistedClientSession;
 }
 
 function createInitialSessionState(): SessionState {
@@ -468,6 +490,16 @@ function advanceBrowserSession({
     };
   }
 
+  const lastEvent = events.at(-1);
+
+  if (lastEvent?.type === "authorization.required") {
+    return {
+      continuationToken: continuationToken ?? session.continuationToken,
+      sessionId,
+      streamIndex: baseStreamIndex + events.length,
+    };
+  }
+
   return createInitialSessionState();
 }
 
@@ -592,7 +624,7 @@ export function AgentChatSession({
   const onSessionStartedRef = useRef<(session: SessionState) => Promise<void> | void>(
     () => {},
   );
-  const persistedSessionRef = useRef<ClientSession | null>(null);
+  const persistedSessionRef = useRef<PersistedClientSession | null>(null);
   persistedSessionRef.current ??= createPersistedClientSession({
     initialSession: activeChat?.session,
     onSessionStarted: (session) => onSessionStartedRef.current(session),
@@ -617,10 +649,15 @@ export function AgentChatSession({
         );
         const events = mergeLocalEvents(snapshotEvents, localEventsRef.current);
 
+        const session = advanceSessionWithLocalEvents(
+          snapshot.session,
+          localEventsRef.current,
+        );
+
         await saveChatSnapshotAction({
           chatId,
           events,
-          session: snapshot.session,
+          session,
         });
         eventIndexRef.current = events.length;
         knownInitialEventsRef.current = events;
@@ -915,8 +952,29 @@ export function AgentChatSession({
         return;
       }
 
-      const event = createAuthorizationDeclinedEvent(authorization);
-      const nextLocalEvents = mergeLocalEvents(localEventsRef.current, [event]);
+      const events = createAuthorizationDeclinedEvents(authorization);
+      const persistedSession = persistedSessionRef.current;
+
+      if (!persistedSession?.state.sessionId) {
+        setClientError("Session is not ready to skip authorization.");
+        return;
+      }
+
+      const previousSession = persistedSession.state;
+      let nextSession: SessionState;
+
+      agent.stop();
+
+      try {
+        nextSession = persistedSession.applyLocalEvents(events);
+      } catch (error) {
+        setClientError(
+          error instanceof Error ? error.message : "Failed to update session state.",
+        );
+        return;
+      }
+
+      const nextLocalEvents = mergeLocalEvents(localEventsRef.current, events);
 
       localEventsRef.current = nextLocalEvents;
       setLocalEvents(nextLocalEvents);
@@ -926,17 +984,27 @@ export function AgentChatSession({
       try {
         const result = await skipChatAuthorizationAction({
           chatId,
-          event,
+          events,
+          session: nextSession,
         });
 
-        eventIndexRef.current = Math.max(eventIndexRef.current, result.eventIndex + 1);
+        eventIndexRef.current = Math.max(
+          eventIndexRef.current,
+          result.eventIndex + result.eventCount,
+        );
         touchChat(result.chat);
         onPendingUserMessageSettled?.();
       } catch (error) {
-        const eventKey = getLocalEventKey(event);
-        const revertedEvents = localEventsRef.current.filter(
-          (localEvent) => getLocalEventKey(localEvent) !== eventKey,
-        );
+        if (previousSession) {
+          persistedSessionRef.current?.setState(previousSession);
+        }
+
+        const eventKeys = new Set(events.map(getLocalEventKey).filter(Boolean));
+        const revertedEvents = localEventsRef.current.filter((localEvent) => {
+          const key = getLocalEventKey(localEvent);
+
+          return !key || !eventKeys.has(key);
+        });
 
         localEventsRef.current = revertedEvents;
         setLocalEvents(revertedEvents);
@@ -947,7 +1015,7 @@ export function AgentChatSession({
         setSkippingAuthorizationKey(null);
       }
     },
-    [onPendingUserMessageSettled, requestSignIn, touchChat, viewer],
+    [agent, onPendingUserMessageSettled, requestSignIn, touchChat, viewer],
   );
 
   useEffect(() => {
@@ -1318,21 +1386,53 @@ function ConnectionAuthorizationPrompt({
   );
 }
 
-function createAuthorizationDeclinedEvent(
+function createAuthorizationDeclinedEvents(
   authorization: PendingConnectionAuthorization,
-): AuthorizationCompletedStreamEvent {
+): readonly HandleMessageStreamEvent[] {
+  return [
+    {
+      data: {
+        authorization: authorization.authorization,
+        name: authorization.name,
+        outcome: "declined",
+        reason: "skipped",
+        sequence: authorization.sequence,
+        stepIndex: authorization.stepIndex,
+        turnId: authorization.turnId,
+      },
+      type: "authorization.completed",
+    },
+    createSessionWaitingEvent(),
+  ];
+}
+
+function createSessionWaitingEvent(): HandleMessageStreamEvent {
   return {
     data: {
-      authorization: authorization.authorization,
-      name: authorization.name,
-      outcome: "declined",
-      reason: "skipped",
-      sequence: authorization.sequence,
-      stepIndex: authorization.stepIndex,
-      turnId: authorization.turnId,
+      wait: "next-user-message",
     },
-    type: "authorization.completed",
+    meta: {
+      at: new Date().toISOString(),
+    },
+    type: "session.waiting",
   };
+}
+
+function advanceSessionWithLocalEvents(
+  session: SessionState,
+  events: readonly HandleMessageStreamEvent[],
+) {
+  if (events.length === 0 || !session.sessionId) {
+    return session;
+  }
+
+  return advanceBrowserSession({
+    baseStreamIndex: session.streamIndex,
+    continuationToken: session.continuationToken,
+    events,
+    session,
+    sessionId: session.sessionId,
+  });
 }
 
 function mergeLocalEvents(
@@ -1393,6 +1493,10 @@ function areSameStreamEvent(
 function getLocalEventKey(event: HandleMessageStreamEvent) {
   if (event.type === "authorization.completed") {
     return `${event.type}:${event.data.turnId}:${event.data.name}:${event.data.outcome}:${event.data.reason ?? ""}`;
+  }
+
+  if (event.type === "session.waiting") {
+    return `${event.type}:${event.meta?.at ?? "local"}`;
   }
 
   return null;

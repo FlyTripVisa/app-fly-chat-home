@@ -223,13 +223,19 @@ export async function clearChatPendingMessage({
 
 export async function skipChatAuthorization({
   chatId,
-  event,
+  events,
+  session,
   userId,
 }: {
   readonly chatId: string;
-  readonly event: HandleMessageStreamEvent;
+  readonly events: readonly HandleMessageStreamEvent[];
+  readonly session: SessionState;
   readonly userId: string;
 }) {
+  if (events.length === 0) {
+    throw new Error("No authorization events to save.");
+  }
+
   const [ownedChat] = await db
     .select({ id: chat.id })
     .from(chat)
@@ -248,16 +254,25 @@ export async function skipChatAuthorization({
     .limit(1);
   const eventIndex = (lastEvent?.eventIndex ?? -1) + 1;
 
-  await db.insert(chatEvent).values({
-    chatId,
-    event,
-    eventIndex,
-    id: randomUUID(),
-  });
+  await db
+    .insert(chatEvent)
+    .values(
+      events.map((event, offset) => ({
+        chatId,
+        event,
+        eventIndex: eventIndex + offset,
+        id: randomUUID(),
+      })),
+    )
+    .onConflictDoUpdate({
+      set: { event: sql`excluded.event` },
+      target: [chatEvent.chatId, chatEvent.eventIndex],
+    });
 
   const [row] = await db
     .update(chat)
     .set({
+      eveSession: session,
       pendingUserMessage: null,
       pendingUserMessageCreatedAt: null,
       updatedAt: new Date(),
@@ -279,6 +294,7 @@ export async function skipChatAuthorization({
       title: row.title,
       updatedAt: row.updatedAt.toISOString(),
     },
+    eventCount: events.length,
     eventIndex,
   };
 }

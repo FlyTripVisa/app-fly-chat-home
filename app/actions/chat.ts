@@ -101,13 +101,15 @@ export async function clearChatPendingMessageAction(chatId: string) {
 
 export async function skipChatAuthorizationAction(input: {
   readonly chatId: string;
-  readonly event: HandleMessageStreamEvent;
+  readonly events: readonly HandleMessageStreamEvent[];
+  readonly session: SessionState;
 }) {
   const viewer = await requireViewer();
 
   return skipChatAuthorization({
     chatId: input.chatId,
-    event: input.event,
+    events: input.events,
+    session: input.session,
     userId: viewer.id,
   });
 }
