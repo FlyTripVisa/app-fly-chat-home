@@ -52,6 +52,15 @@ export function HomeChatPage() {
   }, [setActiveChatId]);
 
   useEffect(() => {
+    if (pathname === "/") {
+      return;
+    }
+
+    submittingRef.current = false;
+    setSubmitting(false);
+  }, [pathname]);
+
+  useEffect(() => {
     if (!viewer) {
       return;
     }
