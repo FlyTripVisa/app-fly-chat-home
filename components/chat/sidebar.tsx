@@ -212,7 +212,7 @@ export function ChatSidebar({
             </AuthDisplayLoggedIn>
             <AuthDisplayLoggedOut>
               <SidebarSignInButton
-                authDisabled={authDisabled}
+                authDisabled={false}
                 onNavigate={onNavigate}
                 onSignIn={onSignIn}
               />
