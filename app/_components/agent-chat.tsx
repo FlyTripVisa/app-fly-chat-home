@@ -1335,7 +1335,6 @@ export function AgentChatSession({
   useEffect(() => {
     if (
       !viewer ||
-      !pendingUserMessage ||
       !activeChat?.session?.sessionId ||
       resumeStartedRef.current ||
       agent.status !== "ready"
@@ -1345,11 +1344,19 @@ export function AgentChatSession({
 
     const abortController = new AbortController();
     const existingEvents = activeChat.events;
+    const pendingMessageText = pendingUserMessage ?? null;
+    const shouldResumeOpenTurn = hasOpenChatTurn(existingEvents);
+
+    if (!pendingMessageText && !shouldResumeOpenTurn) {
+      return;
+    }
+
     const startIndex = existingEvents.length;
     const shouldIgnoreLeadingWaiting =
+      pendingMessageText !== null &&
       !hasLatestUserMessage(
         reduceEventsToMessageData(existingEvents).messages,
-        pendingUserMessage,
+        pendingMessageText,
       );
     const session = createPersistedClientSession({
       initialSession: activeChat.session,
@@ -1474,19 +1481,6 @@ export function AgentChatSession({
       clearLocalPendingUserMessage();
     }
   }, [clearLocalPendingUserMessage, displayMessages, localPendingUserMessage]);
-
-  useEffect(() => {
-    if (
-      pendingUserMessage &&
-      hasLatestUserMessage(displayMessages, pendingUserMessage)
-    ) {
-      onPendingUserMessageSettled?.(pendingUserMessage);
-    }
-  }, [
-    displayMessages,
-    onPendingUserMessageSettled,
-    pendingUserMessage,
-  ]);
 
   useEffect(() => {
     onControllerChange(
