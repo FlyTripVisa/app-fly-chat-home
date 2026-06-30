@@ -1,5 +1,14 @@
 {
   "$schema": "https://openapi.vercel.sh/vercel.json",
+  "framework": "nextjs",
+  "build": {
+    "env": {
+      "NEXT_PUBLIC_SITE_URL": "fly-chat-ai-home.flytripvisa.workers.dev"
+    }
+  },
+  "experimental": {
+    "serverActions": true
+  },
   "experimentalServices": {
     "web": {
       "entrypoint": ".",
@@ -7,7 +16,7 @@
       "routePrefix": "/"
     },
     "eve": {
-      "buildCommand": "eve build",
+      "buildCommand": "npm run build:eve",
       "entrypoint": ".",
       "framework": "eve",
       "routePrefix": "/_eve_internal/eve"
