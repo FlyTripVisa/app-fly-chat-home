@@ -3,8 +3,9 @@ import { defineConfig } from "drizzle-kit";
 export default defineConfig({
   schema: "./lib/db/schema.ts",
   out: "./lib/db/migrations",
-  dialect: "postgresql",
+  dialect: "sqlite", // D1 এর জন্য 'sqlite' ব্যবহার করতে হয়
   dbCredentials: {
-    url: process.env.DATABASE_URL!,
+    wranglerConfigPath: "./wrangler.jsonc", // আপনার JSONC কনফিগারেশন পাথ
+    dbName: "flytripvisa_db",
   },
 });
